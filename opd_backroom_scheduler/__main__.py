@@ -1,4 +1,9 @@
 from .app import BackroomApp
 
-app = BackroomApp()
-app.mainloop()
+
+def main():
+    BackroomApp().mainloop()
+
+
+if __name__ == "__main__":
+    main()
