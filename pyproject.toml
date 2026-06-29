@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opd-backroom-scheduler"
+version = "1.0.0"
+description = "Weekly backroom and personal-shopper scheduling tool for OPD"
+requires-python = ">=3.10"
+# tkinter ships with the standard library — no pip dependency needed.
+# sqlite3 also ships with the standard library.
+dependencies = []
+
+[project.scripts]
+backroom-scheduler = "opd_backroom_scheduler.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["opd_backroom_scheduler*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
