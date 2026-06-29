@@ -1,8 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import os, re, sqlite3
+import re
 from datetime import datetime, timedelta
-from collections import defaultdict
 
 from . import constants as _constants
 from .constants import (
@@ -11,7 +10,6 @@ from .constants import (
     CLR_BG, CLR_WHITE, CLR_DARK, CLR_MUTED,
     CLR_PERSONAL, CLR_BACKROOM, CLR_GRAY_ROW, CLR_GRAY_TEXT,
     CLR_BACKROOM_BTN, CLR_PERSONAL_BTN,
-    DB_FILE, DEFAULT_THRESHOLDS,
 )
 from .utils import auto_text_color, get_coverage_color, parse_shift, shift_display, shift_sort_key
 from .database import (
@@ -21,6 +19,10 @@ from .database import (
 )
 from .scheduling import build_schedule, assign_exceptions, format_exc_label
 from .widgets import TimelineCanvas, PSTimelineCanvas
+from .database import clear_day
+from .views.board_view import open_board_view
+from .views.exceptions_popup import open_exceptions_popup
+from .views.settings_popup import open_threshold_settings
 
 class BackroomApp(tk.Tk):
     def __init__(self):
@@ -177,45 +179,45 @@ class BackroomApp(tk.Tk):
 
     def _recompute_exc_warning(self, day):
         """Read current ps_rows and recompute uncovered hours warning."""
-        import re as _rw
-        from datetime import datetime as _dtw
         ps_rows = self._last_ps_rows.get(day, [])
         covered = set()
         for r in ps_rows:
-            exc = r.get("exceptions","—")
+            exc = r.get("exceptions", "—")
             if not exc or exc == "—": continue
-            body = exc.replace("EX","").replace("@","").strip()
+            body = exc.replace("EX", "").replace("@", "").strip()
             for part in body.split(","):
                 part = part.strip()
-                rng = _rw.match(r"(\d{1,2})(am|pm)?-(\d{1,2})(am|pm)", part.lower())
+                rng = re.match(r"(\d{1,2})(am|pm)?-(\d{1,2})(am|pm)", part.lower())
                 if rng:
-                    sn=int(rng.group(1));s_per=rng.group(2)
-                    en=int(rng.group(3));e_per=rng.group(4)
-                    eh=en+(12 if e_per=="pm" and en!=12 else 0)
-                    sh=sn+(12 if s_per=="pm" and sn!=12 else 0) if s_per else (sn+(12 if e_per=="pm" and sn<=en and sn!=12 else 0))
-                    for h in range(sh,eh): covered.add(h)
+                    sn = int(rng.group(1)); s_per = rng.group(2)
+                    en = int(rng.group(3)); e_per = rng.group(4)
+                    eh = en + (12 if e_per == "pm" and en != 12 else 0)
+                    sh = sn + (12 if s_per == "pm" and sn != 12 else 0) if s_per else (sn + (12 if e_per == "pm" and sn <= en and sn != 12 else 0))
+                    for h in range(sh, eh): covered.add(h)
                 else:
-                    sm2=_rw.match(r"(\d{1,2})(am|pm)",part.lower())
+                    sm2 = re.match(r"(\d{1,2})(am|pm)", part.lower())
                     if sm2:
-                        h=int(sm2.group(1))
-                        if sm2.group(2)=="pm" and h!=12: h+=12
-                        elif sm2.group(2)=="am" and h==12: h=0
+                        h = int(sm2.group(1))
+                        if sm2.group(2) == "pm" and h != 12: h += 12
+                        elif sm2.group(2) == "am" and h == 12: h = 0
                         covered.add(h)
+
         def _pd(d):
-            m=_rw.match(r"(\d{1,2})(?::(\d{2}))? (AM|PM)\s*[–-]\s*(\d{1,2})(?::(\d{2}))? (AM|PM)",d)
-            if not m: return None,None
-            def c(h,mn,p):
-                h=int(h);mn=int(mn or 0)
-                if p=="PM" and h!=12: h+=12
-                elif p=="AM" and h==12: h=0
-                return _dtw(2000,1,1,h,mn)
-            return c(m.group(1),m.group(2),m.group(3)),c(m.group(4),m.group(5),m.group(6))
-        sts=[_pd(r["shift_display"])[0] for r in ps_rows]
-        ens=[_pd(r["shift_display"])[1] for r in ps_rows]
-        sts=[s for s in sts if s]; ens=[e for e in ens if e]
-        unc=[]
+            m = re.match(r"(\d{1,2})(?::(\d{2}))? (AM|PM)\s*[–-]\s*(\d{1,2})(?::(\d{2}))? (AM|PM)", d)
+            if not m: return None, None
+            def c(h, mn, p):
+                h = int(h); mn = int(mn or 0)
+                if p == "PM" and h != 12: h += 12
+                elif p == "AM" and h == 12: h = 0
+                return datetime(2000, 1, 1, h, mn)
+            return c(m.group(1), m.group(2), m.group(3)), c(m.group(4), m.group(5), m.group(6))
+
+        sts = [_pd(r["shift_display"])[0] for r in ps_rows]
+        ens = [_pd(r["shift_display"])[1] for r in ps_rows]
+        sts = [s for s in sts if s]; ens = [e for e in ens if e]
+        unc = []
         if sts and ens:
-            for h in range(min(s.hour for s in sts),max(e.hour for e in ens)):
+            for h in range(min(s.hour for s in sts), max(e.hour for e in ens)):
                 if h not in covered: unc.append(h)
         self._update_exc_warning(day, unc)
 
@@ -1275,27 +1277,6 @@ class BackroomApp(tk.Tk):
                 except Exception:
                     pass
 
-    def _validate_shift(self):
-        raw = self.shift_var.get().strip()
-        try:
-            return parse_shift(raw)  # None = valid floater
-        except ValueError as e:
-            messagebox.showerror("Invalid shift",str(e),parent=self)
-            return "ERROR"
-
-    def _pick_color(self, target):
-        from tkinter.colorchooser import askcolor
-        initial = self.color_bg_var.get() if target=="bg" else self.color_text_var.get()
-        result  = askcolor(color=initial or "#FFFFFF", parent=self, title="Pick a color")
-        if result and result[1]:
-            hex_col = result[1]
-            if target == "bg":
-                self.color_bg_var.set(hex_col)
-                self._color_bg_swatch.config(bg=hex_col)
-            else:
-                self.color_text_var.set(hex_col)
-                self._color_text_swatch.config(bg=hex_col)
-
     def _transfer_associate(self, day, from_kind):
         """Move selected associate between BR and PS without auto-rebalancing."""
         tv = self.day_tv_br[day] if from_kind == "br" else self.day_tv_ps[day]
@@ -1354,29 +1335,25 @@ class BackroomApp(tk.Tk):
             hours = exc_map.get(r["id"], [])
             r["exceptions"] = format_exc_label(hours) if hours else "—"
             if hours:
-                import re as _re
                 for h_str in hours:
-                    m = _re.match(r"(\d{1,2})(am|pm)", h_str.lower())
+                    m = re.match(r"(\d{1,2})(am|pm)", h_str.lower())
                     if m:
                         h = int(m.group(1))
                         if m.group(2) == "pm" and h != 12: h += 12
                         elif m.group(2) == "am" and h == 12: h = 0
                         covered_hours.add(h)
 
-        # Determine expected hours (all shifts of active PS)
-        from datetime import datetime as _dt, timedelta as _td
-        import re as _re2
         def _pd(disp):
-            m = _re2.match(
+            m = re.match(
                 r"(\d{1,2})(?::(\d{2}))? (AM|PM)\s*[–-]\s*(\d{1,2})(?::(\d{2}))? (AM|PM)",
                 disp)
             if not m: return None, None
-            def c(h,mn,p):
-                h=int(h); mn=int(mn or 0)
-                if p=="PM" and h!=12: h+=12
-                elif p=="AM" and h==12: h=0
-                return _dt(2000,1,1,h,mn)
-            return c(m.group(1),m.group(2),m.group(3)), c(m.group(4),m.group(5),m.group(6))
+            def c(h, mn, p):
+                h = int(h); mn = int(mn or 0)
+                if p == "PM" and h != 12: h += 12
+                elif p == "AM" and h == 12: h = 0
+                return datetime(2000, 1, 1, h, mn)
+            return c(m.group(1), m.group(2), m.group(3)), c(m.group(4), m.group(5), m.group(6))
 
         all_starts = [_pd(r["shift_display"])[0] for r in active_ps]
         all_ends   = [_pd(r["shift_display"])[1] for r in active_ps]
@@ -1419,8 +1396,7 @@ class BackroomApp(tk.Tk):
                 if parsed: return (parsed[0] * 60 + parsed[1], r.get("name",""))
             except Exception: pass
             disp = r.get("shift_display", "")
-            import re as _re
-            m = _re.match(r'(\d{1,2})(?::(\d{2}))? (AM|PM)', disp)
+            m = re.match(r'(\d{1,2})(?::(\d{2}))? (AM|PM)', disp)
             if m:
                 h = int(m.group(1)); mn = int(m.group(2) or 0)
                 if m.group(3) == "PM" and h != 12: h += 12
@@ -1443,336 +1419,7 @@ class BackroomApp(tk.Tk):
 
     # ── BOARD VIEW POPUP ──────────────────────────────────────────────
     def _open_board_view(self, day):
-        """Full-screen no-scroll board for a vertical touchscreen monitor."""
-        br_rows = self._last_br_rows.get(day, [])
-        ps_rows = self._last_ps_rows.get(day, [])
-        if not br_rows and not ps_rows:
-            messagebox.showinfo("No Schedule",
-                                "Generate the schedule first before viewing the board.",
-                                parent=self)
-            return
-
-        # ── Window ───────────────────────────────────────────────────
-        win = tk.Toplevel(self)
-        win.title(f"OPD Board — {DAY_FULL[day]}")
-        BG = "#1A1F2E"
-        win.configure(bg=BG)
-        win.state("zoomed")
-        win.update_idletasks()
-
-        board_state = {"last_co": {}, "alive": True}
-        win.protocol("WM_DELETE_WINDOW",
-                     lambda: (board_state.update({"alive": False}), win.destroy()))
-
-        # ── Layout constants ─────────────────────────────────────────
-        COLS      = ["Name", "Shift", "Break 1", "Lunch", "Break 2"]
-        COL_HDR   = ["#1C3A5E", "#1C3A5E", "#BF360C", "#7B1FA2", "#BF360C"]
-        COL_W     = [3, 2, 2, 2, 2]
-        N_COLS    = len(COLS)
-        PANEL_COLS = N_COLS * 2 + 1   # left panel + divider + right panel
-
-        # Persistent tap state — survives board close/reopen
-        name_taps  = self.board_name_taps.setdefault(day, {})
-        break_taps = self.board_break_taps.setdefault(day, {})
-
-        # ── Fixed header ─────────────────────────────────────────────
-        top = tk.Frame(win, bg="#1565C0", height=52)
-        top.pack(fill="x", side="top")
-        top.pack_propagate(False)
-        tk.Label(top, text="OPD Backroom Board",
-                 font=("Helvetica", 18, "bold"),
-                 bg="#1565C0", fg="white").pack(side="left", padx=20, pady=8)
-        from datetime import date as _date
-        today_str = _date.today().strftime("%B %d, %Y")
-        tk.Label(top, text=f"{DAY_FULL[day]}  ·  {today_str}",
-                 font=("Helvetica", 14),
-                 bg="#1565C0", fg="#90CAF9").pack(side="left", padx=4)
-        tk.Button(top, text="✕  Close", command=win.destroy,
-                  bg="#37474F", fg="white", relief="flat",
-                  padx=14, pady=4, font=("Helvetica", 10, "bold"),
-                  cursor="hand2").pack(side="right", padx=16, pady=10)
-        tk.Button(top, text="🔄  Refresh Board",
-                  command=lambda: render(get_call_outs(day)),
-                  bg="#1565C0", fg="white", relief="flat",
-                  padx=12, pady=4, font=("Helvetica", 9, "bold"),
-                  cursor="hand2").pack(side="right", padx=4, pady=10)
-        board_exc_var = tk.StringVar(value="")
-        board_exc_lbl = tk.Label(top, textvariable=board_exc_var,
-                                  font=("Helvetica", 10, "bold"),
-                                  bg="#D32F2F", fg="#000000",
-                                  padx=10, pady=4)
-        if day in self._day_exc_warn_var:
-            _cw = self._day_exc_warn_var[day].get()
-            if _cw:
-                board_exc_var.set(_cw)
-                board_exc_lbl.pack(side="left", padx=12, pady=6)
-
-        # ── Fixed legend ─────────────────────────────────────────────
-        leg = tk.Frame(win, bg="#263238", height=28)
-        leg.pack(fill="x", side="bottom")
-        leg.pack_propagate(False)
-        for txt, col in [(" 🟡 Break 20min ", "#FFD54F"),
-                          (" 🟠 Lunch 60min ", "#FF8A65"),
-                          (" — No break ",     "#78909C"),
-                          (" Hold break 0.8s to start (green) · Hold 4× to re-stamp ", "#90CAF9"),
-                          (" 3 quick taps on name = call-out ", "#EF9A9A")]:
-            tk.Label(leg, text=txt, font=("Helvetica", 8),
-                     bg="#263238", fg=col).pack(side="left", padx=8, pady=4)
-
-        # ── Body ─────────────────────────────────────────────────────
-        body = tk.Frame(win, bg=BG)
-        body.pack(fill="both", expand=True, side="top")
-
-        # ── Render function (called on open + every refresh) ─────────
-        def render(call_outs):
-            import time as _time
-            from datetime import datetime
-            # Sync board warning with main schedule warning
-            if day in self._day_exc_warn_var:
-                cur_w = self._day_exc_warn_var[day].get()
-                board_exc_var.set(cur_w)
-                if cur_w and not board_exc_lbl.winfo_ismapped():
-                    board_exc_lbl.pack(side="left", padx=12, pady=6)
-                elif not cur_w and board_exc_lbl.winfo_ismapped():
-                    board_exc_lbl.pack_forget()
-
-            cur_br = self._last_br_rows.get(day, br_rows)
-            cur_ps = self._last_ps_rows.get(day, ps_rows)
-            br_vis = [r for r in cur_br if call_outs.get(r["id"], "") != "callout"]
-            ps_vis = [r for r in cur_ps if call_outs.get(r["id"], "") != "callout"]
-
-            # Assoc color lookup: id -> (bg, text)  — blank = use defaults
-            assoc_colors = {a[0]: (a[4] or "", a[5] or "") for a in get_associates()}
-
-            # Clear body
-            for w in body.winfo_children():
-                w.destroy()
-
-            # Column configuration
-            for ci in range(PANEL_COLS):
-                if ci == N_COLS:
-                    body.grid_columnconfigure(ci, weight=0, minsize=6)
-                else:
-                    pci = ci if ci < N_COLS else ci - N_COLS - 1
-                    body.grid_columnconfigure(ci, weight=COL_W[pci], uniform="cols")
-
-            # Build flat item list
-            items = []
-            def add_sec(title, color, rows):
-                if not rows: return
-                items.append({"type": "sec_hdr", "title": title,
-                              "color": color, "count": len(rows)})
-                items.append({"type": "col_hdr", "color": color})
-                for i in range(0, len(rows), 2):
-                    items.append({"type": "pair",
-                                  "pair": (rows[i],
-                                           rows[i+1] if i+1 < len(rows) else None)})
-            add_sec("📦  Backroom Crew",    "#1565C0", br_vis)
-            add_sec("🛒  Personal Shoppers","#2E7D32",  ps_vis)
-
-            n = len(items)
-            if n == 0: return
-            for ri in range(n):
-                body.grid_rowconfigure(ri, weight=1, uniform="rows")
-
-            # ── Draw one associate row ────────────────────────────────
-            def draw_assoc(row, grid_row, col_offset, row_idx):
-                aid = row["id"]
-                cust_bg, cust_text = assoc_colors.get(aid, ("", ""))
-                row_bg  = cust_bg if cust_bg else ("#263238" if row_idx%2==0 else "#2E3B42")
-                name_fg = auto_text_color(cust_bg) if cust_bg else "white"
-
-                # Name cell — triple tap → call-out
-                nt  = name_taps.setdefault(aid, {"n": 0, "last": 0.0})
-                exc_label = row.get("exceptions", "—")
-                exc_suffix = f"  {exc_label}" if exc_label and exc_label != "—" else ""
-                nv  = tk.StringVar(value=row["name"] + exc_suffix)
-                nl  = tk.Label(body, textvariable=nv,
-                               font=("Helvetica", 11, "bold"),
-                               bg=row_bg, fg=name_fg,
-                               anchor="w", padx=8, cursor="hand2")
-                nl.grid(row=grid_row, column=col_offset,
-                        sticky="nsew", padx=1, pady=1)
-
-                def _revert_name_color(nt=nt, label_ref={"lbl": None}):
-                    """Called after 2s to revert color if no further tap came."""
-                    if _time.time() - nt["last"] >= 1.9 and nt["n"] > 0:
-                        nt["n"] = 0
-                        lbl = label_ref["lbl"]
-                        if lbl and lbl.winfo_exists():
-                            lbl.config(fg=name_fg)
-
-                def on_name_tap(e, aid=aid, nv=nv, nl=nl,
-                                nt=nt, rfg=name_fg, lref={"lbl": None}):
-                    lref["lbl"] = nl
-                    now = _time.time()
-                    if now - nt["last"] > 2.0:
-                        nt["n"] = 0
-                        if nl.winfo_exists():
-                            nl.config(fg=rfg)
-                    nt["last"] = now
-                    nt["n"] += 1
-                    if nt["n"] == 1:
-                        nl.config(fg="#FF8A65")
-                        nl.after(2100, lambda: _revert_name_color(nt, lref))
-                    elif nt["n"] == 2:
-                        nl.config(fg="#EF5350")
-                        nl.after(2100, lambda: _revert_name_color(nt, lref))
-                    elif nt["n"] >= 3:
-                        nt["n"] = 0
-                        if nl.winfo_exists():
-                            nl.config(fg=rfg)
-                        self._set_callout(aid, day, "callout", "br")
-
-                nl.bind("<Button-1>", on_name_tap)
-
-                # Shift cell
-                tk.Label(body, text=row["shift_display"],
-                         font=("Helvetica", 9),
-                         bg=row_bg, fg="#78909C",
-                         anchor="center").grid(
-                    row=grid_row, column=col_offset+1,
-                    sticky="nsew", padx=1, pady=1)
-
-                # Break / Lunch cells
-                for b_idx, (bkey, bval, bfg, dur) in enumerate([
-                    ("break1", row["break1"], "#FFD54F", 20),
-                    ("lunch",  row["lunch"],  "#FF8A65", 60),
-                    ("break2", row["break2"], "#FFD54F", 20),
-                ]):
-                    gcol = col_offset + 2 + b_idx
-
-                    if bval == "—":
-                        tk.Label(body, text="—",
-                                 font=("Helvetica", 11),
-                                 bg=row_bg, fg="#546E7A",
-                                 anchor="center").grid(
-                            row=grid_row, column=gcol,
-                            sticky="nsew", padx=1, pady=1)
-                        continue
-
-                    # Reuse existing tap state so refresh doesn't reset timers
-                    tk_key = (aid, bkey)
-                    bt  = break_taps.setdefault(tk_key, {"n": 0, "last": 0.0, "text": bval, "seq": 0})
-                    cv  = tk.StringVar(value=bt["text"])
-                    # Restore green if already stamped (survives board refresh)
-                    lbl_bg = "#1B5E20" if bt["n"] >= 1 else row_bg
-                    lbl_fg = "white"   if bt["n"] >= 1 else bfg
-
-                    lbl = tk.Label(body, textvariable=cv,
-                                   font=("Helvetica", 13, "bold"),
-                                   bg=lbl_bg, fg=lbl_fg,
-                                   anchor="center", cursor="hand2")
-                    lbl.grid(row=grid_row, column=gcol,
-                             sticky="nsew", padx=1, pady=1)
-
-                    # Hold state for press-and-hold detection
-                    hold_state = {"job": None}
-
-                    def on_press(e, lbl=lbl, cv=cv, bt=bt,
-                                 orig=bval, rbg=row_bg, fg_n=bfg,
-                                 hs=hold_state):
-                        """Start an 800ms hold timer on mouse/touch press."""
-                        def fire():
-                            hs["job"] = None
-                            now = _time.time()
-                            gap = now - bt["last"]
-
-                            if bt["n"] == 0:
-                                # First stamp — hold to start
-                                bt["n"] = 1
-                                bt["last"] = now
-                                bt["text"] = datetime.now().strftime("%I:%M %p").lstrip("0")
-                                cv.set(f"Started {bt['text']}")
-                                if lbl.winfo_exists():
-                                    lbl.config(bg="#1B5E20", fg="white")
-                            else:
-                                # Already stamped — hold 4 times in succession to re-stamp
-                                bt["last"] = now
-                                if gap > 2.0:
-                                    bt["seq"] = 0
-                                else:
-                                    bt["seq"] = bt.get("seq", 0) + 1
-                                    if bt["seq"] >= 3:
-                                        bt["seq"] = 0
-                                        bt["n"] = 1
-                                        bt["text"] = datetime.now().strftime("%I:%M %p").lstrip("0")
-                                        cv.set(f"Started {bt['text']}")
-                                        if lbl.winfo_exists():
-                                            lbl.config(bg="#1B5E20", fg="white")
-
-                        if hs["job"] is not None:
-                            try: lbl.after_cancel(hs["job"])
-                            except Exception: pass
-                        hs["job"] = lbl.after(800, fire)
-
-                    def on_release(e, hs=hold_state):
-                        """Cancel the hold if released before 800ms."""
-                        if hs["job"] is not None:
-                            try: lbl.after_cancel(hs["job"])
-                            except Exception: pass
-                            hs["job"] = None
-
-                    lbl.bind("<ButtonPress-1>",   on_press)
-                    lbl.bind("<ButtonRelease-1>", on_release)
-
-            # ── Render items ─────────────────────────────────────────
-            pair_idx = 0
-            for ri, item in enumerate(items):
-                if item["type"] == "sec_hdr":
-                    c = item["color"]
-                    f = tk.Frame(body, bg=c)
-                    f.grid(row=ri, column=0, columnspan=PANEL_COLS,
-                           sticky="nsew", pady=(6, 0))
-                    tk.Label(f, text=item["title"],
-                             font=("Helvetica", 12, "bold"),
-                             bg=c, fg="white", anchor="w", padx=14).pack(
-                        side="left", fill="both", expand=True)
-                    tk.Label(f, text=f"{item['count']} associates",
-                             font=("Helvetica", 10),
-                             bg=c, fg="white", anchor="e", padx=14).pack(side="right")
-
-                elif item["type"] == "col_hdr":
-                    for po in [0, N_COLS + 1]:
-                        for ci, (cn, hbg) in enumerate(zip(COLS, COL_HDR)):
-                            tk.Label(body, text=cn,
-                                     font=("Helvetica", 9, "bold"),
-                                     bg=hbg, fg="white",
-                                     anchor="center").grid(
-                                row=ri, column=po+ci,
-                                sticky="nsew", padx=1, pady=1)
-                    tk.Frame(body, bg="#0D1117").grid(
-                        row=ri, column=N_COLS, sticky="nsew")
-
-                elif item["type"] == "pair":
-                    left, right = item["pair"]
-                    tk.Frame(body, bg="#0D1117").grid(
-                        row=ri, column=N_COLS,
-                        sticky="nsew", padx=1, pady=1)
-                    draw_assoc(left,  ri, 0,          pair_idx * 2)
-                    if right:
-                        draw_assoc(right, ri, N_COLS + 1, pair_idx * 2 + 1)
-                    else:
-                        tk.Frame(body, bg=BG).grid(
-                            row=ri, column=N_COLS + 1,
-                            columnspan=N_COLS,
-                            sticky="nsew", padx=1, pady=1)
-                    pair_idx += 1
-
-        # ── Initial render + auto-refresh ────────────────────────────
-        call_outs = get_call_outs(day)
-        board_state["last_co"] = dict(call_outs)
-        render(call_outs)
-
-        def refresh_check():
-            if not board_state["alive"]: return
-            cur = get_call_outs(day)
-            if cur != board_state["last_co"]:
-                board_state["last_co"] = dict(cur)
-                render(cur)
-            win.after(3000, refresh_check)
-
-        win.after(3000, refresh_check)
+        open_board_view(self, day)
     # ── CALL-OUT CONTEXT MENU ────────────────────────────────────────
     def _callout_menu(self, event, day, kind, tv):
         """Right-click on a schedule row → mark or clear call-out."""
@@ -1824,207 +1471,7 @@ class BackroomApp(tk.Tk):
         menu.tk_popup(event.x_root, event.y_root)
 
     def _exceptions_popup(self, aid, day):
-        """Popup to assign exceptions hours — shows full coverage table."""
-        import re as _re
-        from datetime import datetime as _dt, timedelta as _td
-
-        ps_rows  = self._last_ps_rows.get(day, [])
-        row_dict = next((r for r in ps_rows if r["id"] == aid), None)
-        if not row_dict: return
-
-        def parse_disp(disp):
-            m = _re.match(
-                r"(\d{1,2})(?::(\d{2}))? (AM|PM)\s*[\u2013-]\s*(\d{1,2})(?::(\d{2}))? (AM|PM)",
-                disp)
-            if not m: return None, None
-            def c(h, mn, p):
-                h=int(h); mn=int(mn or 0)
-                if p=="PM" and h!=12: h+=12
-                elif p=="AM" and h==12: h=0
-                return _dt(2000,1,1,h,mn)
-            return c(m.group(1),m.group(2),m.group(3)), c(m.group(4),m.group(5),m.group(6))
-
-        def fmt_h(dt):
-            h12 = dt.hour % 12 or 12
-            return f"{h12}{'am' if dt.hour < 12 else 'pm'}"
-
-        def to_h24(s):
-            m = _re.match(r"(\d{1,2})(am|pm)", s.lower())
-            if not m: return None
-            h = int(m.group(1))
-            if m.group(2)=="pm" and h!=12: h+=12
-            elif m.group(2)=="am" and h==12: h=0
-            return h
-
-        def expand_exc(exc_str):
-            """Expand 'EX 5-2pm', 'EX @ 10am', 'EX 6-8am,9-11am' to set of h24 ints."""
-            hours = set()
-            if not exc_str or exc_str == "—": return hours
-            body = exc_str.replace("EX","").replace("@","").strip()
-            for part in body.split(","):
-                part = part.strip()
-                # Range: ends with am/pm on the end token only, e.g. "5-2pm" or "6am-8am"
-                range_m = _re.match(
-                    r"(\d{1,2})(am|pm)?-(\d{1,2})(am|pm)", part.lower())
-                if range_m:
-                    sn = int(range_m.group(1))
-                    s_per = range_m.group(2)   # may be None
-                    en = int(range_m.group(3))
-                    e_per = range_m.group(4)
-                    # Resolve end hour
-                    eh = en
-                    if e_per == "pm" and en != 12: eh = en + 12
-                    elif e_per == "am" and en == 12: eh = 0
-                    # Resolve start hour — if no suffix, infer from end
-                    if s_per:
-                        sh = sn
-                        if s_per == "pm" and sn != 12: sh = sn + 12
-                        elif s_per == "am" and sn == 12: sh = 0
-                    else:
-                        # No suffix: assume same period as end, but earlier
-                        sh = sn
-                        if e_per == "pm" and sn <= en:
-                            # e.g. "2-6pm" or "11-12pm" → both pm
-                            if sn != 12: sh = sn + 12
-                        elif e_per == "pm" and sn > en:
-                            # e.g. "5-2pm" → start is am
-                            pass   # sh stays as plain int (5 = 5am)
-                        elif e_per == "am":
-                            pass
-                    for hh in range(sh, eh):
-                        hours.add(hh)
-                else:
-                    # Single hour token like "10am"
-                    h = to_h24(part)
-                    if h is not None: hours.add(h)
-            return hours
-
-        # All PS rows sorted by shift start (for coverage table)
-        all_ps = sorted(ps_rows, key=lambda r: (
-            (parse_disp(r.get("shift_display",""))[0] or _dt(2000,1,1,23,0)).hour,
-            r.get("name","")
-        ))
-
-        # Build complete hour coverage map across all day
-        coverage_map = {}  # h24 -> name (who is assigned)
-        for r in all_ps:
-            if r.get("exceptions","—") == "—": continue
-            for h24 in expand_exc(r["exceptions"]):
-                coverage_map[h24] = r["name"]
-
-        # Build hour slots available to this associate
-        s_dt, e_dt = parse_disp(row_dict.get("shift_display",""))
-        if not s_dt: return
-        hour_slots_dt = []
-        t = s_dt.replace(minute=0)
-        if t < s_dt: t += _td(hours=1)
-        while t < e_dt:
-            hour_slots_dt.append(t)
-            t += _td(hours=1)
-
-        cur_hours_h24 = expand_exc(row_dict.get("exceptions","—"))
-
-        # ── Dialog ────────────────────────────────────────────────────
-        dlg = tk.Toplevel(self)
-        dlg.title(f"Exceptions — {row_dict['name']}")
-        dlg.configure(bg=CLR_BG)
-        dlg.resizable(True, False)
-        dlg.grab_set()
-
-        tk.Label(dlg, text=f"Assign Exceptions — {row_dict['name']}",
-                 font=("Helvetica",11,"bold"), bg=CLR_BG, fg=CLR_DARK,
-                 pady=8).pack(padx=20, anchor="w")
-
-        # Coverage table header
-        tbl_frame = tk.LabelFrame(dlg, text="  Current Exceptions Coverage  ",
-                                   bg=CLR_BG, fg=CLR_DARK,
-                                   font=("Helvetica",9,"bold"),
-                                   padx=8, pady=6)
-        tbl_frame.pack(fill="x", padx=16, pady=(0,8))
-
-        # Find all hours that need coverage (from first PS shift to last)
-        all_starts = [parse_disp(r["shift_display"])[0] for r in ps_rows]
-        all_ends   = [parse_disp(r["shift_display"])[1] for r in ps_rows]
-        all_starts = [s for s in all_starts if s]
-        all_ends   = [e for e in all_ends   if e]
-        if all_starts and all_ends:
-            day_start_h = min(s.hour for s in all_starts)
-            day_end_h   = max(e.hour for e in all_ends)
-            t = _dt(2000,1,1,day_start_h,0)
-            col = 0
-            while t.hour < day_end_h:
-                h24  = t.hour
-                h_s  = fmt_h(t)
-                who  = coverage_map.get(h24, "")
-                bg   = "#C8E6C9" if who else "#FFCDD2"
-                lbl_txt = h_s + "\n" + (who if who else "Uncovered")
-                tk.Label(tbl_frame, text=lbl_txt,
-                         bg=bg, fg="#1B5E20" if who else "#B71C1C",
-                         font=("Helvetica", 7, "bold"),
-                         padx=4, pady=2, relief="solid", bd=1,
-                         width=7, anchor="center",
-                         wraplength=52).grid(row=0, column=col, padx=2, pady=2)
-                col += 1
-                t += _td(hours=1)
-
-        # Hour checkboxes for this associate
-        tk.Label(dlg, text=f"Select hours for {row_dict['name']}:",
-                 font=("Helvetica",9,"bold"), bg=CLR_BG, fg=CLR_DARK).pack(
-            padx=16, anchor="w")
-
-        vars_map = {}  # fmt_h string -> BooleanVar
-        box_frame = tk.Frame(dlg, bg=CLR_BG)
-        box_frame.pack(padx=16, pady=6, fill="x")
-        for i, slot_dt in enumerate(hour_slots_dt):
-            h24  = slot_dt.hour
-            h_s  = fmt_h(slot_dt)
-            v    = tk.BooleanVar(value=h24 in cur_hours_h24)
-            vars_map[h_s] = (v, h24)
-            # Highlight if currently uncovered
-            currently_covered = h24 in coverage_map
-            cb_fg = "#E65100" if not currently_covered else CLR_DARK
-            tk.Checkbutton(box_frame, text=h_s, variable=v,
-                           bg=CLR_BG, activebackground=CLR_BG,
-                           fg=cb_fg,
-                           font=("Helvetica",10,"bold" if not currently_covered else "normal"),
-                           cursor="hand2").grid(row=0, column=i, padx=5)
-
-        tk.Label(dlg, text="Orange = currently uncovered hours",
-                 bg=CLR_BG, fg="#E65100", font=("Helvetica",7,"italic")).pack(
-            padx=16, anchor="w", pady=(0,6))
-
-        def do_save():
-            chosen_h24 = sorted(h24 for _, (v, h24) in vars_map.items() if v.get())
-            chosen_strs = [fmt_h(_dt(2000,1,1,h,0)) for h in chosen_h24]
-            label = format_exc_label(chosen_strs) if chosen_strs else "—"
-            row_dict["exceptions"] = label
-            self._populate_day(day, self._last_br_rows.get(day,[]),
-                                    self._last_ps_rows.get(day,[]))
-            self._recompute_exc_warning(day)
-            dlg.destroy()
-
-        def do_clear():
-            row_dict["exceptions"] = "—"
-            self._populate_day(day, self._last_br_rows.get(day,[]),
-                                    self._last_ps_rows.get(day,[]))
-            self._recompute_exc_warning(day)
-            dlg.destroy()
-
-        btn_r = tk.Frame(dlg, bg=CLR_BG)
-        btn_r.pack(pady=10)
-        tk.Button(btn_r, text="Save", command=do_save,
-                  bg=CLR_HEADER_BLUE, fg=CLR_WHITE, relief="flat",
-                  padx=14, pady=5, font=("Helvetica",9,"bold"),
-                  cursor="hand2").pack(side="left", padx=6)
-        tk.Button(btn_r, text="Clear EX", command=do_clear,
-                  bg="#607D8B", fg=CLR_WHITE, relief="flat",
-                  padx=10, pady=5, font=("Helvetica",9),
-                  cursor="hand2").pack(side="left", padx=6)
-        tk.Button(btn_r, text="Cancel", command=dlg.destroy,
-                  bg="#E0E0E0", fg="#555", relief="flat",
-                  padx=10, pady=5, font=("Helvetica",9),
-                  cursor="hand2").pack(side="left", padx=6)
-
+        open_exceptions_popup(self, aid, day)
     def _set_callout(self, aid, day, status, kind="br"):
         """Flag a call-out. Board hides them. Always fully regenerate exceptions."""
         set_call_out(aid, day, status)
@@ -2037,172 +1484,7 @@ class BackroomApp(tk.Tk):
 
     # ── COVERAGE THRESHOLD SETTINGS ──────────────────────────────────
     def _open_threshold_settings(self):
-        """Dialog to configure coverage colors and backroom cap."""
-        dlg = tk.Toplevel(self)
-        dlg.title("Schedule Settings")
-        dlg.configure(bg=CLR_BG)
-        dlg.resizable(True, True)
-        dlg.minsize(420, 480)
-        dlg.grab_set()
-
-        # ── Title ────────────────────────────────────────────────────
-        tk.Label(dlg, text="Schedule Settings",
-                 font=("Helvetica", 13, "bold"), bg=CLR_BG, fg=CLR_DARK,
-                 pady=10).pack(fill="x", padx=20)
-
-        # ── Backroom cap ─────────────────────────────────────────────
-        cap_frame = tk.LabelFrame(dlg, text="  Backroom Capacity  ",
-                                   bg=CLR_BG, fg=CLR_DARK,
-                                   font=("Helvetica", 9, "bold"),
-                                   padx=12, pady=10)
-        cap_frame.pack(fill="x", padx=20, pady=(0, 12))
-        tk.Label(cap_frame, text="Max associates in backroom at once:",
-                 bg=CLR_BG, fg=CLR_DARK, font=("Helvetica", 10)).grid(
-                 row=0, column=0, sticky="w")
-        cap_var = tk.IntVar(value=_constants._backroom_max)
-        tk.Spinbox(cap_frame, from_=1, to=30, textvariable=cap_var,
-                   width=6, font=("Helvetica", 11), relief="solid",
-                   justify="center").grid(row=0, column=1, padx=12, sticky="w")
-        tk.Label(cap_frame,
-                 text="Associates beyond the cap auto-move to Personal Shoppers.",
-                 bg=CLR_BG, fg=CLR_MUTED, font=("Helvetica", 8)).grid(
-                 row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-
-        # ── Color thresholds ─────────────────────────────────────────
-        thresh_outer = tk.LabelFrame(dlg, text="  Coverage Bar Colors  ",
-                                      bg=CLR_BG, fg=CLR_DARK,
-                                      font=("Helvetica", 9, "bold"),
-                                      padx=12, pady=8)
-        thresh_outer.pack(fill="both", expand=True, padx=20, pady=(0, 8))
-
-        tk.Label(thresh_outer,
-                 text="Each tier applies when headcount >= Min Count.",
-                 bg=CLR_BG, fg=CLR_MUTED, font=("Helvetica", 8)).pack(
-                 anchor="w", pady=(0, 6))
-
-        # Column headers
-        hdr_frame = tk.Frame(thresh_outer, bg=CLR_BG)
-        hdr_frame.pack(fill="x")
-        for txt, w in [("Min Count >=", 10), ("Color", 13), ("Preview", 8)]:
-            tk.Label(hdr_frame, text=txt, bg=CLR_HEADER_BLUE, fg=CLR_WHITE,
-                     font=("Helvetica", 9, "bold"), width=w,
-                     pady=4, relief="flat").pack(side="left", padx=1)
-
-        COLOR_HEX = {
-            "Red":         "#EF5350",
-            "Orange":      "#FF9800",
-            "Yellow":      "#FFF176",
-            "Light Green": "#A5D6A7",
-            "Med Green":   "#66BB6A",
-            "Dark Green":  "#2E7D32",
-        }
-        COLOR_NAMES = list(COLOR_HEX.keys())
-
-        def hex_to_name(h):
-            for name, val in COLOR_HEX.items():
-                if val.upper() == h.upper():
-                    return name
-            return "Dark Green"
-
-        # One frame per threshold row — packed vertically, NOT in a grid
-        row_vars = []
-
-        def build_threshold_rows(container):
-            # Clear existing
-            for w in container.winfo_children():
-                w.destroy()
-            row_vars.clear()
-            for i, (mn, col) in enumerate(_constants._thresholds):
-                row_bg = CLR_WHITE if i % 2 == 0 else "#F0F4F8"
-                rf = tk.Frame(container, bg=row_bg)
-                rf.pack(fill="x", pady=1)
-
-                count_var = tk.IntVar(value=mn)
-                color_var = tk.StringVar(value=hex_to_name(col))
-
-                tk.Spinbox(rf, from_=0, to=20, textvariable=count_var,
-                           width=8, font=("Helvetica", 10), relief="solid",
-                           justify="center", bg=row_bg).pack(
-                           side="left", padx=12, pady=4)
-
-                cb = ttk.Combobox(rf, textvariable=color_var,
-                                   values=COLOR_NAMES, state="readonly",
-                                   width=13, font=("Helvetica", 10))
-                cb.pack(side="left", padx=8, pady=4)
-
-                swatch = tk.Frame(rf, width=44, height=22,
-                                   bg=COLOR_HEX.get(hex_to_name(col), col),
-                                   relief="solid", bd=1)
-                swatch.pack(side="left", padx=8, pady=4)
-                swatch.pack_propagate(False)
-
-                def on_color_change(*_, cv=color_var, sw=swatch):
-                    sw.config(bg=COLOR_HEX.get(cv.get(), "#888"))
-                color_var.trace_add("write", on_color_change)
-
-                row_vars.append((count_var, color_var))
-
-        rows_container = tk.Frame(thresh_outer, bg=CLR_BG)
-        rows_container.pack(fill="both", expand=True)
-        build_threshold_rows(rows_container)
-
-        # ── Buttons ──────────────────────────────────────────────────
-        btn_row = tk.Frame(dlg, bg=CLR_BG)
-        btn_row.pack(fill="x", padx=20, pady=(0, 14))
-
-        def apply_settings():
-            old_cap = _constants._backroom_max
-            _constants._backroom_max = cap_var.get()
-            new_thresh = []
-            for count_var, color_var in row_vars:
-                new_thresh.append([count_var.get(),
-                                    COLOR_HEX.get(color_var.get(), "#888")])
-            new_thresh.sort(key=lambda x: x[0])
-            _constants._thresholds = new_thresh
-            for day in DAYS:
-                if day in self._generated:
-                    self.day_timelines[day]._render()
-                    self.day_ps_timelines[day]._render()
-                    # If cap changed, re-run build_schedule so auto assignments rebalance
-                    if _constants._backroom_max != old_cap:
-                        day_state  = get_day_state(day)
-                        assocs     = get_associates()
-                        active = [
-                            (a_id, n, sh, pf,
-                             day_state.get(a_id,{}).get("assignment","auto"),
-                             day_state.get(a_id,{}).get("today_shift",""))
-                            for a_id, n, sh, pf, *_ in assocs
-                            if day_state.get(a_id,{}).get("present")
-                        ]
-                        br_rows, ps_rows = build_schedule(active)
-                        self._last_br_rows[day] = br_rows
-                        self._last_ps_rows[day] = ps_rows
-                        self._populate_day(day, br_rows, ps_rows)
-            dlg.destroy()
-
-        def reset_defaults():
-            _constants._thresholds   = [list(t) for t in DEFAULT_THRESHOLDS]
-            _constants._backroom_max = 10
-            cap_var.set(10)
-            build_threshold_rows(rows_container)
-            for day in DAYS:
-                if day in self._generated:
-                    self.day_timelines[day]._render()
-                    self.day_ps_timelines[day]._render()
-
-        tk.Button(btn_row, text="Apply", command=apply_settings,
-                  bg=CLR_HEADER_BLUE, fg=CLR_WHITE, relief="flat",
-                  padx=16, pady=6, font=("Helvetica", 10, "bold"),
-                  cursor="hand2").pack(side="left", padx=(0, 8))
-        tk.Button(btn_row, text="Reset Defaults", command=reset_defaults,
-                  bg="#607D8B", fg=CLR_WHITE, relief="flat",
-                  padx=12, pady=6, font=("Helvetica", 9),
-                  cursor="hand2").pack(side="left", padx=(0, 8))
-        tk.Button(btn_row, text="Cancel", command=dlg.destroy,
-                  bg="#E0E0E0", fg="#555", relief="flat",
-                  padx=12, pady=6, font=("Helvetica", 9),
-                  cursor="hand2").pack(side="left")
-
+        open_threshold_settings(self)
     def _populate_day(self, day, br_rows, ps_rows):
         """Fill both treeviews and schedule deferred timeline redraw."""
         call_outs   = get_call_outs(day)
@@ -2329,10 +1611,7 @@ class BackroomApp(tk.Tk):
             return
 
         # Clear DB state for this day
-        con = sqlite3.connect(DB_FILE)
-        con.execute("DELETE FROM weekly_schedule WHERE day=?", (day,))
-        con.execute("DELETE FROM call_outs WHERE day=?", (day,))
-        con.commit(); con.close()
+        clear_day(day)
 
         # Clear in-memory state
         self._pres_vars   = {k: v for k, v in self._pres_vars.items()   if k[0] != day}

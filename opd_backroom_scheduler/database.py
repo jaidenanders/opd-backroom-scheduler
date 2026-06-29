@@ -95,6 +95,12 @@ def save_day_state(day, aid, present, assignment, today_shift):
                 (aid, day, int(present), assignment, today_shift))
     con.commit(); con.close()
 
+def clear_day(day):
+    con = sqlite3.connect(DB_FILE)
+    con.execute("DELETE FROM weekly_schedule WHERE day=?", (day,))
+    con.execute("DELETE FROM call_outs WHERE day=?", (day,))
+    con.commit(); con.close()
+
 def clear_week():
     con = sqlite3.connect(DB_FILE)
     con.execute("DELETE FROM weekly_schedule")
