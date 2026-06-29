@@ -17,6 +17,7 @@ from .database import (
     get_day_state, save_day_state, clear_day, clear_week, get_week_summary,
     get_call_outs, set_call_out, clear_call_outs_for_week, reset_associate_attendance,
     load_settings, save_setting,
+    snapshot_day, restore_day, snapshot_week, restore_week,
 )
 from .scheduling import build_schedule, assign_exceptions, format_exc_label
 from .widgets import TimelineCanvas, PSTimelineCanvas
@@ -58,6 +59,7 @@ class BackroomApp(tk.Tk):
         self.attendance     = {}   # aid -> {present, assignment, today_shift}
         self._delete_mode   = False
         self._delete_checks = {}
+        self._undo_stack    = []  # list of (label, callable) restore functions
         self._build_ui()
         self._load_day(self.active_day)
 
@@ -80,6 +82,10 @@ class BackroomApp(tk.Tk):
 
         right = tk.Frame(hdr, bg=CLR_HEADER_BLUE)
         right.pack(side="right")
+        self._undo_btn = tk.Button(right, text="↩ Undo", command=self._undo,
+                  bg="#546E7A", fg=CLR_WHITE, relief="flat", padx=10, pady=5,
+                  font=("Helvetica", 9), cursor="hand2", state="disabled")
+        self._undo_btn.pack(side="left", padx=4)
         tk.Button(right, text="📅 Clear Day", command=self._clear_day,
                   bg="#37474F", fg=CLR_WHITE, relief="flat", padx=10, pady=5,
                   font=("Helvetica", 9), cursor="hand2").pack(side="left", padx=4)
@@ -1604,6 +1610,26 @@ class BackroomApp(tk.Tk):
         messagebox.showinfo("Week Generated ✓",
                             "Schedule generated for all days.\n"
                             "Click each day tab to review.", parent=self)
+    # ── UNDO ──────────────────────────────────────────────────────────
+    _MAX_UNDO = 5
+
+    def _push_undo(self, label, restore_fn):
+        self._undo_stack.append((label, restore_fn))
+        if len(self._undo_stack) > self._MAX_UNDO:
+            self._undo_stack.pop(0)
+        self._undo_btn.config(state="normal", text=f"↩ Undo {label}")
+
+    def _undo(self):
+        if not self._undo_stack:
+            return
+        label, restore_fn = self._undo_stack.pop()
+        restore_fn()
+        if self._undo_stack:
+            next_label = self._undo_stack[-1][0]
+            self._undo_btn.config(text=f"↩ Undo {next_label}")
+        else:
+            self._undo_btn.config(state="disabled", text="↩ Undo")
+
     def _clear_day(self):
         """Clear attendance and schedule for the currently active day only."""
         day = self.active_day
@@ -1618,6 +1644,17 @@ class BackroomApp(tk.Tk):
             parent=self
         ):
             return
+
+        # Snapshot before clearing so the action can be undone
+        snap_sched, snap_calls = snapshot_day(day)
+
+        def _restore_day():
+            restore_day(day, snap_sched, snap_calls)
+            self._generated.discard(day)
+            self.after(50, lambda: self._render_attendance_panel(day))
+            self.after(50, lambda: self._populate_day(day))
+
+        self._push_undo(f"Clear {DAY_FULL[day]}", _restore_day)
 
         # Clear DB state for this day
         clear_day(day)
@@ -1657,6 +1694,16 @@ class BackroomApp(tk.Tk):
         if messagebox.askyesno("Clear Week",
                                "Clear all attendance and assignments for the entire week?",
                                parent=self):
+            snap_sched, snap_calls = snapshot_week()
+
+            def _restore_week():
+                restore_week(snap_sched, snap_calls)
+                self._generated.clear()
+                self.after(100, lambda: self._load_day())
+                self.after(100, lambda: self._render_attendance_panel("Mon"))
+
+            self._push_undo("Clear Week", _restore_week)
+
             clear_week()
             clear_call_outs_for_week()
             self._pres_vars.clear()

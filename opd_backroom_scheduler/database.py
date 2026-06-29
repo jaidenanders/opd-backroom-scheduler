@@ -165,6 +165,77 @@ def save_day_state(day, aid, present, assignment, today_shift):
     finally:
         con.close()
 
+def snapshot_day(day):
+    """Return (schedule_rows, callout_rows) for a day — used for undo."""
+    con = _connect()
+    try:
+        sched = con.execute(
+            "SELECT associate_id,present,assignment,today_shift FROM weekly_schedule WHERE day=?",
+            (day,)
+        ).fetchall()
+        calls = con.execute(
+            "SELECT associate_id,status FROM call_outs WHERE day=?", (day,)
+        ).fetchall()
+        return sched, calls
+    finally:
+        con.close()
+
+def restore_day(day, sched_rows, callout_rows):
+    """Restore a previously snapshotted day (used by undo)."""
+    con = _connect()
+    try:
+        con.execute("DELETE FROM weekly_schedule WHERE day=?", (day,))
+        con.execute("DELETE FROM call_outs WHERE day=?", (day,))
+        for aid, present, assignment, today_shift in sched_rows:
+            con.execute(
+                "INSERT INTO weekly_schedule(associate_id,day,present,assignment,today_shift) "
+                "VALUES(?,?,?,?,?)",
+                (aid, day, present, assignment, today_shift)
+            )
+        for aid, status in callout_rows:
+            con.execute(
+                "INSERT INTO call_outs(associate_id,day,status) VALUES(?,?,?)",
+                (aid, day, status)
+            )
+        con.commit()
+    finally:
+        con.close()
+
+def snapshot_week():
+    """Return (schedule_rows, callout_rows) for the entire week — used for undo."""
+    con = _connect()
+    try:
+        sched = con.execute(
+            "SELECT associate_id,day,present,assignment,today_shift FROM weekly_schedule"
+        ).fetchall()
+        calls = con.execute(
+            "SELECT associate_id,day,status FROM call_outs"
+        ).fetchall()
+        return sched, calls
+    finally:
+        con.close()
+
+def restore_week(sched_rows, callout_rows):
+    """Restore a previously snapshotted week (used by undo)."""
+    con = _connect()
+    try:
+        con.execute("DELETE FROM weekly_schedule")
+        con.execute("DELETE FROM call_outs")
+        for aid, day, present, assignment, today_shift in sched_rows:
+            con.execute(
+                "INSERT INTO weekly_schedule(associate_id,day,present,assignment,today_shift) "
+                "VALUES(?,?,?,?,?)",
+                (aid, day, present, assignment, today_shift)
+            )
+        for aid, day, status in callout_rows:
+            con.execute(
+                "INSERT INTO call_outs(associate_id,day,status) VALUES(?,?,?)",
+                (aid, day, status)
+            )
+        con.commit()
+    finally:
+        con.close()
+
 def clear_day(day):
     con = _connect()
     try:
