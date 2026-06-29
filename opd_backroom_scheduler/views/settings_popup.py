@@ -7,7 +7,7 @@ from ..constants import (
     CLR_BG, CLR_DARK, CLR_MUTED, CLR_WHITE,
     CLR_HEADER_BLUE,
 )
-from ..database import get_day_state, get_associates
+from ..database import get_day_state, get_associates, save_setting
 from ..scheduling import build_schedule
 
 
@@ -124,6 +124,8 @@ def open_threshold_settings(app):
             new_thresh.append([count_var.get(), COLOR_HEX.get(color_var.get(), "#888")])
         new_thresh.sort(key=lambda x: x[0])
         _constants._thresholds = new_thresh
+        save_setting("backroom_max", _constants._backroom_max)
+        save_setting("thresholds", _constants._thresholds)
         for day in DAYS:
             if day in app._generated:
                 app.day_timelines[day]._render()
@@ -147,6 +149,8 @@ def open_threshold_settings(app):
     def reset_defaults():
         _constants._thresholds   = [list(t) for t in DEFAULT_THRESHOLDS]
         _constants._backroom_max = 10
+        save_setting("backroom_max", 10)
+        save_setting("thresholds", _constants._thresholds)
         cap_var.set(10)
         build_threshold_rows(rows_container)
         for day in DAYS:

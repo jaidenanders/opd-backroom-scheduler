@@ -14,12 +14,12 @@ from .constants import (
 from .utils import auto_text_color, get_coverage_color, parse_shift, shift_display, shift_sort_key
 from .database import (
     init_db, get_associates, add_associate, update_associate, delete_associate,
-    get_day_state, save_day_state, clear_week, get_week_summary,
+    get_day_state, save_day_state, clear_day, clear_week, get_week_summary,
     get_call_outs, set_call_out, clear_call_outs_for_week, reset_associate_attendance,
+    load_settings, save_setting,
 )
 from .scheduling import build_schedule, assign_exceptions, format_exc_label
 from .widgets import TimelineCanvas, PSTimelineCanvas
-from .database import clear_day
 from .views.board_view import open_board_view
 from .views.exceptions_popup import open_exceptions_popup
 from .views.settings_popup import open_threshold_settings
@@ -32,6 +32,7 @@ class BackroomApp(tk.Tk):
         self.minsize(1200, 720)
         self.resizable(True, True)
         init_db()
+        self._load_settings()
         clear_call_outs_for_week()  # start each session with clean call-out state
         self.active_day = "Mon"
         self._day_state  = {}   # day -> {aid: {present,assignment,today_shift}}
@@ -59,6 +60,14 @@ class BackroomApp(tk.Tk):
         self._delete_checks = {}
         self._build_ui()
         self._load_day(self.active_day)
+
+    def _load_settings(self):
+        """Restore persisted thresholds and backroom cap from DB."""
+        stored = load_settings()
+        if "thresholds" in stored:
+            _constants._thresholds = stored["thresholds"]
+        if "backroom_max" in stored:
+            _constants._backroom_max = stored["backroom_max"]
 
     # ── UI SKELETON ───────────────────────────────────────────────────
     def _build_ui(self):
